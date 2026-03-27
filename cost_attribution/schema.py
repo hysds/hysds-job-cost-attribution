@@ -63,6 +63,7 @@ INDEX_TEMPLATE = {
                         "ec2_pricing_source": {"type": "keyword"},
                         "output_bytes": {"type": "long"},
                         "pricing_source": {"type": "keyword"},
+                        "cost_metric": {"type": "keyword"},
                         "last_updated": {"type": "date"},
                     }
                 },
@@ -93,6 +94,7 @@ def build_job_cost_document(
     config_window_start: str,
     config_window_end: str,
     run_id: str,
+    cost_metric: str = "AmortizedCost",
 ) -> dict[str, Any]:
     """Build a job_cost document for OpenSearch.
 
@@ -170,6 +172,7 @@ def build_job_cost_document(
             "ec2_pricing_source": cost["ec2_pricing_source"],
             "output_bytes": cost["output_bytes"],
             "pricing_source": cost["ec2_pricing_source"],
+            "cost_metric": cost_metric,
             "last_updated": datetime.now(timezone.utc).isoformat(),
         },
         "resource_usage": {
@@ -184,6 +187,7 @@ def build_queue_overhead_document(
     config_window_start: str,
     config_window_end: str,
     run_id: str,
+    cost_metric: str = "AmortizedCost",
 ) -> dict[str, Any]:
     """Build a queue_overhead document for OpenSearch."""
     window_dt = datetime.fromisoformat(config_window_start.replace("Z", "+00:00"))
@@ -201,5 +205,8 @@ def build_queue_overhead_document(
         },
         "queue": overhead["queue"],
         "cost": overhead["cost"],
+        "cost_inputs": {
+            "cost_metric": cost_metric,
+        },
         "overhead_details": overhead["overhead_details"],
     }

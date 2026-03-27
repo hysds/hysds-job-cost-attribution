@@ -1,5 +1,4 @@
 """CLI entry point for the cost attribution batch process."""
-
 import logging
 import uuid
 from collections import defaultdict
@@ -23,7 +22,7 @@ from .calculator import (
 from .mozart_client import fetch_all_jobs, fetch_metrics_extra_attempts
 from .redis_publisher import publish_documents, check_redis_connection
 from .schema import build_job_cost_document, build_queue_overhead_document
-from .utils import asg_name_to_queue, safe_get
+from .utils import asg_name_to_queue, filter_skipped_job_types, safe_get
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +43,7 @@ def build_config(
     asg_prefix: str,
     region: str,
     use_fallback: bool,
+    cost_metric: str = "AmortizedCost",
 ) -> AttributionConfig:
     """Build AttributionConfig for the given date."""
     target_date = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -59,6 +59,7 @@ def build_config(
         asg_prefix=asg_prefix,
         aws_region=region,
         use_fallback_pricing=use_fallback,
+        cost_metric=cost_metric,
     )
 
 
@@ -67,6 +68,8 @@ def run_hourly_estimator(
     asg_prefix: str,
     dry_run: bool,
     verbose: bool,
+    skip_job_types: tuple[str, ...] = (),
+    cost_metric: str = "AmortizedCost",
 ) -> None:
     """Hourly estimator: cost recent terminal jobs that lack cost documents.
 
@@ -94,6 +97,7 @@ def run_hourly_estimator(
         asg_prefix=asg_prefix,
         aws_region=region,
         use_fallback_pricing=True,  # No CE in estimator mode
+        cost_metric=cost_metric,
     )
 
     # Fetch terminal jobs from last 48h
@@ -104,6 +108,9 @@ def run_hourly_estimator(
         return
 
     logger.info("Found %d terminal jobs in last 48h", len(jobs))
+
+    # Filter out skipped job types
+    jobs = filter_skipped_job_types(jobs, skip_job_types)
 
     # Query cost index to find jobs that already have cost docs
     cost_client = OpenSearch(
@@ -184,6 +191,7 @@ def run_hourly_estimator(
         )
         doc = build_job_cost_document(
             job, cost, window_start, window_end, run_id,
+            cost_metric=config.cost_metric,
         )
         documents.append(doc)
 
@@ -212,6 +220,7 @@ def run_hourly_estimator(
 
     click.echo(f"\nHourly Estimator Summary")
     click.echo(f"{'=' * 40}")
+    click.echo(f"Cost metric:       {config.cost_metric}")
     click.echo(f"Jobs in last 48h:  {len(jobs)}")
     click.echo(f"Already costed:    {len(existing_ids)}")
     click.echo(f"Newly estimated:   {len(documents)}")
@@ -232,6 +241,8 @@ def run_date_range(
     use_fallback: bool,
     include_retries: bool,
     dry_run: bool,
+    skip_job_types: tuple[str, ...] = (),
+    cost_metric: str = "AmortizedCost",
 ) -> None:
     """Backfill cost attribution across a date range with a single CE call.
 
@@ -265,7 +276,7 @@ def run_date_range(
     ce_end_exclusive = (dt_end + timedelta(days=1)).strftime("%Y-%m-%d")
 
     # Step 1: Check Redis connectivity (unless dry run)
-    temp_config = build_config(start_date, redis_password, asg_prefix, region, use_fallback)
+    temp_config = build_config(start_date, redis_password, asg_prefix, region, use_fallback, cost_metric)
     if not dry_run:
         if not check_redis_connection(temp_config):
             raise click.ClickException("Cannot connect to Redis. Check connection settings.")
@@ -276,6 +287,7 @@ def run_date_range(
         ce_client = create_ce_client(temp_config)
         costs_by_day = fetch_queue_costs_by_day(
             ce_client, start_date, ce_end_exclusive, asg_prefix,
+            cost_metric=temp_config.cost_metric,
         )
         logger.info(
             "Fetched CE costs for %d days in single API call", len(costs_by_day),
@@ -290,6 +302,7 @@ def run_date_range(
         asg_prefix=asg_prefix,
         aws_region=region,
         use_fallback_pricing=use_fallback,
+        cost_metric=cost_metric,
     )
     all_jobs = fetch_all_jobs(range_config)
     logger.info("Fetched %d total jobs for full range", len(all_jobs))
@@ -300,6 +313,9 @@ def run_date_range(
         if extra:
             all_jobs.extend(extra)
             logger.info("Added %d retry attempts, total jobs now: %d", len(extra), len(all_jobs))
+
+    # Filter out skipped job types
+    all_jobs = filter_skipped_job_types(all_jobs, skip_job_types)
 
     # Step 4: Group jobs by day using time_end
     jobs_by_day: dict[str, list] = defaultdict(list)
@@ -343,7 +359,7 @@ def run_date_range(
             continue
 
         # Build per-day config
-        day_config = build_config(day_str, redis_password, asg_prefix, region, use_fallback)
+        day_config = build_config(day_str, redis_password, asg_prefix, region, use_fallback, cost_metric)
 
         # Compute queue_total_seconds for this day's jobs
         queue_total_seconds: dict[str, float] = defaultdict(float)
@@ -393,6 +409,7 @@ def run_date_range(
                 job, cost,
                 day_config.window_start, day_config.window_end,
                 day_config.run_id,
+                cost_metric=day_config.cost_metric,
             )
             day_documents.append(doc)
 
@@ -422,6 +439,7 @@ def run_date_range(
                     overhead,
                     day_config.window_start, day_config.window_end,
                     day_config.run_id,
+                    cost_metric=day_config.cost_metric,
                 )
                 day_documents.append(doc)
 
@@ -456,6 +474,7 @@ def run_date_range(
 
     click.echo(f"\nDate Range Backfill Summary: {start_date} to {end_date}")
     click.echo(f"{'=' * 55}")
+    click.echo(f"Cost metric:         {cost_metric}")
     click.echo(f"Total days in range: {total_days}")
     click.echo(f"Days processed:      {days_processed}")
     click.echo(f"Days skipped (no jobs): {days_skipped_no_jobs}")
@@ -513,6 +532,12 @@ def run_date_range(
     help="Force fallback pricing (skip Cost Explorer).",
 )
 @click.option(
+    "--cost-metric",
+    type=click.Choice(["UnblendedCost", "AmortizedCost", "BlendedCost"], case_sensitive=True),
+    default="AmortizedCost",
+    help="AWS Cost Explorer metric (default: AmortizedCost). Use AmortizedCost for reserved instances.",
+)
+@click.option(
     "--estimate-recent",
     is_flag=True,
     default=False,
@@ -523,6 +548,13 @@ def run_date_range(
     is_flag=True,
     default=False,
     help="Include overwritten retry attempts from metrics in cost attribution.",
+)
+@click.option(
+    "--skip-job-types",
+    multiple=True,
+    default=(),
+    help="Job type prefixes to exclude from cost attribution (repeatable). "
+         "E.g., --skip-job-types job-workflow skips all job-workflow:* jobs.",
 )
 @click.option(
     "--dry-run",
@@ -543,8 +575,10 @@ def main(
     asg_prefix: str,
     region: str,
     use_fallback: bool,
+    cost_metric: str,
     estimate_recent: bool,
     include_retries: bool,
+    skip_job_types: tuple[str, ...],
     dry_run: bool,
     verbose: bool,
 ) -> None:
@@ -565,6 +599,8 @@ def main(
             asg_prefix=asg_prefix,
             dry_run=dry_run,
             verbose=verbose,
+            skip_job_types=skip_job_types,
+            cost_metric=cost_metric,
         )
         return
 
@@ -578,6 +614,8 @@ def main(
             use_fallback=use_fallback,
             include_retries=include_retries,
             dry_run=dry_run,
+            skip_job_types=skip_job_types,
+            cost_metric=cost_metric,
         )
         return
 
@@ -587,7 +625,7 @@ def main(
         date = target.strftime("%Y-%m-%d")
 
     logger.info("Starting cost attribution for %s", date)
-    config = build_config(date, redis_password, asg_prefix, region, use_fallback)
+    config = build_config(date, redis_password, asg_prefix, region, use_fallback, cost_metric)
     logger.info("Run ID: %s", config.run_id)
     logger.info("Window: %s → %s", config.window_start, config.window_end)
 
@@ -609,6 +647,9 @@ def main(
             jobs.extend(extra)
             logger.info("Added %d retry attempts, total jobs now: %d", len(extra), len(jobs))
 
+    # Step 2c: Filter out skipped job types
+    jobs = filter_skipped_job_types(jobs, skip_job_types)
+
     # Step 3: Pre-compute total job seconds per queue
     queue_total_seconds: dict[str, float] = defaultdict(float)
     for job in jobs:
@@ -626,7 +667,7 @@ def main(
         ce_start = date
         ce_end = (datetime.strptime(date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
 
-        raw_costs = fetch_queue_costs(ce_client, ce_start, ce_end, asg_prefix)
+        raw_costs = fetch_queue_costs(ce_client, ce_start, ce_end, asg_prefix, cost_metric=config.cost_metric)
         logger.info("Got CE tag-grouped costs for %d ASGs", len(raw_costs))
 
         # Map raw ASG names to queue names, keep only actual job queues
@@ -670,6 +711,7 @@ def main(
             job, cost,
             config.window_start, config.window_end,
             config.run_id,
+            cost_metric=config.cost_metric,
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
@@ -709,6 +751,7 @@ def main(
                 overhead,
                 config.window_start, config.window_end,
                 config.run_id,
+                cost_metric=config.cost_metric,
             )
             documents.append(doc)
 
@@ -733,6 +776,7 @@ def main(
     # Summary
     click.echo(f"\nCost Attribution Summary for {date}")
     click.echo(f"{'=' * 45}")
+    click.echo(f"Cost metric:       {config.cost_metric}")
     click.echo(f"Jobs processed:    {len(job_costs)}")
     if include_retries:
         retry_count = sum(1 for j in jobs if j.get("is_retry_attempt"))

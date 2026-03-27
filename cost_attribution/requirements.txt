@@ -1,0 +1,5 @@
+boto3==1.42.13
+click==8.3.1
+msgpack_python==0.5.6
+opensearch_py==3.0.0
+redis==7.4.0

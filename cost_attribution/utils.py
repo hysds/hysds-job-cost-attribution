@@ -1,7 +1,12 @@
 """Utility functions for cost attribution."""
 
+import logging
 import re
+from collections import Counter
 from datetime import datetime, timezone
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def parse_job_type(job_type: str) -> tuple[str, str]:
@@ -65,6 +70,43 @@ def iso_to_datetime(iso_str: str) -> datetime:
     if iso_str.endswith("Z"):
         iso_str = iso_str[:-1] + "+00:00"
     return datetime.fromisoformat(iso_str)
+
+
+def filter_skipped_job_types(
+    jobs: list[dict[str, Any]],
+    skip_job_types: tuple[str, ...] | list[str],
+) -> list[dict[str, Any]]:
+    """Filter out jobs whose type starts with any of the given prefixes.
+
+    Args:
+        jobs: List of job documents.
+        skip_job_types: Job type prefixes to skip (e.g., "job-workflow-orchestrator").
+            A job is skipped if its "type" field starts with any prefix.
+
+    Returns:
+        Filtered list of jobs (skipped jobs removed).
+    """
+    if not skip_job_types:
+        return jobs
+
+    kept = []
+    skipped_counts: Counter[str] = Counter()
+    for job in jobs:
+        job_type = job.get("type", "")
+        if any(job_type.startswith(prefix) for prefix in skip_job_types):
+            skipped_counts[job_type] += 1
+        else:
+            kept.append(job)
+
+    total_skipped = sum(skipped_counts.values())
+    if total_skipped:
+        logger.info(
+            "Skipped %d jobs matching --skip-job-types: %s",
+            total_skipped,
+            ", ".join(f"{t} ({n})" for t, n in skipped_counts.most_common()),
+        )
+
+    return kept
 
 
 def safe_get(d: dict, *keys, default=None):

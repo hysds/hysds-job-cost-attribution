@@ -65,6 +65,7 @@ class AttributionConfig:
 
     # Cost Explorer
     use_fallback_pricing: bool = False  # Force fallback pricing
+    cost_metric: str = "AmortizedCost"  # UnblendedCost, AmortizedCost, or BlendedCost
 
     @property
     def mozart_url(self) -> str:

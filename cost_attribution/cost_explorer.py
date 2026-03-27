@@ -21,6 +21,7 @@ def fetch_queue_costs_by_day(
     start_date: str,
     end_date: str,
     asg_prefix: str = "",
+    cost_metric: str = "AmortizedCost",
 ) -> dict[str, dict[str, float]]:
     """Fetch daily costs grouped by Name tag, keyed by date.
 
@@ -42,7 +43,7 @@ def fetch_queue_costs_by_day(
         response = ce_client.get_cost_and_usage(
             TimePeriod={"Start": start_date, "End": end_date},
             Granularity="DAILY",
-            Metrics=["UnblendedCost"],
+            Metrics=[cost_metric],
             GroupBy=[{"Type": "TAG", "Key": "Name"}],
         )
 
@@ -60,7 +61,7 @@ def fetch_queue_costs_by_day(
                     continue
                 if asg_prefix and not name.startswith(asg_prefix):
                     continue
-                amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
+                amount = float(group["Metrics"][cost_metric]["Amount"])
                 day_costs[name] = day_costs.get(name, 0) + amount
 
             costs_by_day[day] = day_costs
@@ -76,6 +77,7 @@ def fetch_queue_costs(
     start_date: str,
     end_date: str,
     asg_prefix: str = "",
+    cost_metric: str = "AmortizedCost",
 ) -> dict[str, float]:
     """Fetch daily costs grouped by Name tag from Cost Explorer.
 
@@ -97,7 +99,7 @@ def fetch_queue_costs(
         response = ce_client.get_cost_and_usage(
             TimePeriod={"Start": start_date, "End": end_date},
             Granularity="DAILY",
-            Metrics=["UnblendedCost"],
+            Metrics=[cost_metric],
             GroupBy=[{"Type": "TAG", "Key": "Name"}],
         )
 
@@ -114,7 +116,7 @@ def fetch_queue_costs(
                 # Client-side filter to MAAP ASGs
                 if asg_prefix and not name.startswith(asg_prefix):
                     continue
-                amount = float(group["Metrics"]["UnblendedCost"]["Amount"])
+                amount = float(group["Metrics"][cost_metric]["Amount"])
                 costs[name] = costs.get(name, 0) + amount
 
     except Exception as e:
