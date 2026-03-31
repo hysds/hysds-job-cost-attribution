@@ -1,0 +1,7 @@
+{
+  "smap-pge-radiometer": "smap-pge-radiometer-workflow",
+  "smap-ingest-file": ["smap-bulk-ingest-file", "smap-ingest-file"],
+  "smap-pge-preprocessor": "smap-pge-preprocessor-workflow",
+  "smap-trigger": "smap-ingest-file",
+  "smap-l0a-pge": "smap-l0a-ingest-file"
+}

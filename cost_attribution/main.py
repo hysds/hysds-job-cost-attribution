@@ -22,19 +22,22 @@ from .calculator import (
 from .mozart_client import fetch_all_jobs, fetch_metrics_extra_attempts
 from .redis_publisher import publish_documents, check_redis_connection
 from .schema import build_job_cost_document, build_queue_overhead_document
-from .utils import asg_name_to_queue, filter_skipped_job_types, safe_get
+from .utils import asg_name_to_queue, apply_queue_map, filter_skipped_job_types, load_queue_map, safe_get
 
 logger = logging.getLogger(__name__)
 
 
 def setup_logging(verbose: bool) -> None:
     """Configure logging."""
-    level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
-        level=level,
+        level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
+    if verbose:
+        # Only enable DEBUG for our modules, not boto3/urllib3/opensearch
+        logging.getLogger("cost_attribution").setLevel(logging.DEBUG)
+        logging.getLogger("__main__").setLevel(logging.DEBUG)
 
 
 def build_config(
@@ -243,6 +246,7 @@ def run_date_range(
     dry_run: bool,
     skip_job_types: tuple[str, ...] = (),
     cost_metric: str = "AmortizedCost",
+    queue_map: dict[str, str] | None = None,
 ) -> None:
     """Backfill cost attribution across a date range with a single CE call.
 
@@ -373,17 +377,37 @@ def run_date_range(
         infra_cost = 0.0
 
         if not use_fallback and day_ce_raw:
-            queue_costs = {}
+            ce_stripped = {}
             for asg_name, cost in day_ce_raw.items():
                 queue_name = asg_name_to_queue(asg_name, asg_prefix)
-                queue_costs[queue_name] = queue_costs.get(queue_name, 0) + cost
+                ce_stripped[queue_name] = ce_stripped.get(queue_name, 0) + cost
 
-            infra_cost = sum(c for q, c in queue_costs.items() if q not in queue_total_seconds)
-            queue_costs = {q: c for q, c in queue_costs.items() if q in queue_total_seconds}
-            if infra_cost > 0:
+            matched, unmatched = apply_queue_map(ce_stripped, set(queue_total_seconds), queue_map)
+            infra_cost = sum(unmatched.values())
+            queue_costs = matched
+
+            if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
-                    "Day %s: excluded $%.4f in non-queue infrastructure costs",
-                    day_str, infra_cost,
+                    "Day %s: CE queue names matched (%d): %s",
+                    day_str, len(matched),
+                    ", ".join(f"{q} (${c:.4f})" for q, c in sorted(matched.items(), key=lambda x: -x[1])),
+                )
+                logger.debug(
+                    "Day %s: CE queue names UNMATCHED (%d, $%.4f total): %s",
+                    day_str, len(unmatched), infra_cost,
+                    ", ".join(f"{q} (${c:.4f})" for q, c in sorted(unmatched.items(), key=lambda x: -x[1])),
+                )
+                job_queues_no_ce = {q for q in queue_total_seconds if q not in matched}
+                if job_queues_no_ce:
+                    logger.debug(
+                        "Day %s: Job queues with NO CE match (%d): %s",
+                        day_str, len(job_queues_no_ce),
+                        ", ".join(sorted(job_queues_no_ce)),
+                    )
+            elif infra_cost > 0:
+                logger.info(
+                    "Day %s: excluded $%.4f in non-queue costs (%d unmatched CE names)",
+                    day_str, infra_cost, len(unmatched),
                 )
 
         # Calculate per-job costs
@@ -485,10 +509,12 @@ def run_date_range(
         retry_count = sum(1 for j in all_jobs if j.get("is_retry_attempt"))
         if retry_count:
             click.echo(f"  Retry attempts:    {retry_count}")
+    if not use_fallback:
+        click.echo(f"CE total (all):      ${ce_grand_total:.4f}")
+        click.echo(f"  Job queues:        ${grand_total_job_cost + grand_total_overhead:.4f}")
+        click.echo(f"  Infra (excl):      ${grand_total_infra:.4f}  (pcm-*, etc.)")
     click.echo(f"Total job cost:      ${grand_total_job_cost:.4f}")
     click.echo(f"Total overhead:      ${grand_total_overhead:.4f}")
-    if not use_fallback and grand_total_infra > 0:
-        click.echo(f"Total infra (excl):  ${grand_total_infra:.4f}  (pcm-*, etc.)")
     click.echo(f"Documents:           {len(all_documents)}")
     if dry_run:
         click.echo("Mode:                DRY RUN (not published)")
@@ -519,6 +545,13 @@ def run_date_range(
     "--asg-prefix",
     default="",
     help="ASG name prefix to strip when mapping to queue names.",
+)
+@click.option(
+    "--queue-map-file",
+    type=click.Path(exists=True),
+    default=None,
+    help="JSON file mapping HySDS queue names to CE/ASG tag names (after prefix strip). "
+         'E.g., {"smap-pge-radiometer": "smap-pge-radiometer-workflow"}',
 )
 @click.option(
     "--region",
@@ -573,6 +606,7 @@ def main(
     date_range: tuple[str, str] | None,
     redis_password: str | None,
     asg_prefix: str,
+    queue_map_file: str | None,
     region: str,
     use_fallback: bool,
     cost_metric: str,
@@ -588,6 +622,9 @@ def main(
     results to Redis for Logstash → OpenSearch ingestion.
     """
     setup_logging(verbose)
+
+    # Load queue map if provided
+    queue_map = load_queue_map(queue_map_file) if queue_map_file else None
 
     # Mutual exclusivity check
     if date and date_range:
@@ -616,6 +653,7 @@ def main(
             dry_run=dry_run,
             skip_job_types=skip_job_types,
             cost_metric=cost_metric,
+            queue_map=queue_map,
         )
         return
 
@@ -671,19 +709,30 @@ def main(
         logger.info("Got CE tag-grouped costs for %d ASGs", len(raw_costs))
 
         # Map raw ASG names to queue names, keep only actual job queues
-        queue_costs = {}
+        ce_stripped = {}
         for asg_name, cost in raw_costs.items():
             queue_name = asg_name_to_queue(asg_name, asg_prefix)
-            queue_costs[queue_name] = queue_costs.get(queue_name, 0) + cost
+            ce_stripped[queue_name] = ce_stripped.get(queue_name, 0) + cost
 
-        # Filter to queues that have jobs (excludes pcm-mozart, pcm-grq, etc.)
-        infra_cost = sum(c for q, c in queue_costs.items() if q not in queue_total_seconds)
-        queue_costs = {q: c for q, c in queue_costs.items() if q in queue_total_seconds}
-        if infra_cost > 0:
-            logger.info("Excluded $%.4f in non-queue infrastructure costs (pcm-*, etc.)", infra_cost)
+        # Match CE names to job queues (using queue map if provided)
+        matched, unmatched = apply_queue_map(ce_stripped, set(queue_total_seconds), queue_map)
+        infra_cost = sum(unmatched.values())
+        queue_costs = matched
 
-        for q, c in sorted(queue_costs.items(), key=lambda x: -x[1]):
-            logger.debug("  Queue %-40s $%.4f", q, c)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("CE queue names MATCHED (%d):", len(matched))
+            for q, c in sorted(matched.items(), key=lambda x: -x[1]):
+                logger.debug("  %-50s $%.4f", q, c)
+            logger.debug("CE queue names UNMATCHED (%d, $%.4f total):", len(unmatched), infra_cost)
+            for q, c in sorted(unmatched.items(), key=lambda x: -x[1]):
+                logger.debug("  %-50s $%.4f", q, c)
+            job_queues_no_ce = {q for q in queue_total_seconds if q not in matched}
+            if job_queues_no_ce:
+                logger.debug("Job queues with NO CE match (%d):", len(job_queues_no_ce))
+                for q in sorted(job_queues_no_ce):
+                    logger.debug("  %s  (%.1f job-seconds)", q, queue_total_seconds[q])
+        elif infra_cost > 0:
+            logger.info("Excluded $%.4f in non-queue costs (%d unmatched CE names)", infra_cost, len(unmatched))
 
     # Step 5: Calculate per-job costs
     job_costs = []
