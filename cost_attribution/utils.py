@@ -1,5 +1,6 @@
 """Utility functions for cost attribution."""
 
+import json
 import logging
 import re
 from collections import Counter
@@ -107,6 +108,81 @@ def filter_skipped_job_types(
         )
 
     return kept
+
+
+def load_queue_map(path: str) -> dict[str, str | list[str]]:
+    """Load a queue-to-ASG mapping from a JSON file.
+
+    The file maps HySDS job queue names to CE/ASG tag names (after prefix strip).
+    Values can be a single string or a list (multiple ASGs per queue).
+    Example:
+        {
+            "smap-pge-radiometer": ["smap-pge-radiometer-workflow", "smap-pge-radiometer-spot"],
+            "smap-ingest-file": "smap-bulk-ingest-file"
+        }
+
+    Returns:
+        Dict mapping job_queue_name -> ce_asg_name(s)
+    """
+    with open(path) as f:
+        mapping = json.load(f)
+    if not isinstance(mapping, dict):
+        raise ValueError(f"Queue map file must contain a JSON object, got {type(mapping).__name__}")
+    logger.info("Loaded queue map with %d entries from %s", len(mapping), path)
+    return mapping
+
+
+def apply_queue_map(
+    ce_costs: dict[str, float],
+    job_queues: set[str],
+    queue_map: dict[str, str | list[str]] | None = None,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Match CE queue names to job queue names using an optional mapping.
+
+    Matching rules (in order for each CE name):
+    1. Inverted queue_map: if the CE name is a value in queue_map, map to the corresponding key
+    2. Exact match: CE name is in job_queues
+
+    Unmapped CE names that match a job queue exactly need no config entry.
+
+    Args:
+        ce_costs: Dict mapping CE queue name (after prefix strip) -> cost
+        job_queues: Set of job queue names from Mozart
+        queue_map: Optional dict mapping job_queue -> ce_asg_name or list of ce_asg_names
+
+    Returns:
+        (matched, unmatched) where matched is keyed by job queue name
+    """
+    # Invert: ce_name -> job_queue
+    ce_to_queue: dict[str, str] = {}
+    if queue_map:
+        for job_q, ce_names in queue_map.items():
+            if isinstance(ce_names, list):
+                for ce_name in ce_names:
+                    ce_to_queue[ce_name] = job_q
+            else:
+                ce_to_queue[ce_names] = job_q
+
+    matched: dict[str, float] = {}
+    unmatched: dict[str, float] = {}
+
+    for ce_name, cost in ce_costs.items():
+        if ce_name in ce_to_queue:
+            job_q = ce_to_queue[ce_name]
+            if job_q in job_queues:
+                matched[job_q] = matched.get(job_q, 0) + cost
+            else:
+                logger.warning(
+                    "Queue map maps CE '%s' -> job queue '%s', but no jobs found for that queue",
+                    ce_name, job_q,
+                )
+                unmatched[ce_name] = cost
+        elif ce_name in job_queues:
+            matched[ce_name] = matched.get(ce_name, 0) + cost
+        else:
+            unmatched[ce_name] = cost
+
+    return matched, unmatched
 
 
 def safe_get(d: dict, *keys, default=None):
