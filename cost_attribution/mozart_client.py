@@ -167,13 +167,12 @@ def fetch_metrics_extra_attempts(
         List of flattened job dicts for the extra attempts, enriched with
         metadata inherited from the corresponding Mozart record.
     """
-    # Build lookup from job name to Mozart record
+    # Build lookup from payload_id (UUID) to Mozart record.
+    # Metrics stores this UUID in job.job_info.job_payload.payload_task_id.
     mozart_by_name: dict[str, dict] = {}
     for job in mozart_jobs:
         payload_id = job.get("payload_id", "")
         if payload_id:
-            # job name in metrics is the payload_id minus the timestamp suffix
-            # but actually job.job_info.id in metrics == payload_id in Mozart
             mozart_by_name[payload_id] = job
 
     if not mozart_by_name:
@@ -198,14 +197,14 @@ def fetch_metrics_extra_attempts(
                     },
                     {
                         "terms": {
-                            "job.job_info.id": list(mozart_by_name.keys())
+                            "job.job_info.job_payload.payload_task_id": list(mozart_by_name.keys())
                         }
                     },
                 ],
             }
         },
         "_source": [
-            "job.job_info.id",
+            "job.job_info.job_payload.payload_task_id",
             "job.job_info.status",
             "job.job_info.time_queued",
             "job.job_info.time_start",
@@ -243,7 +242,12 @@ def fetch_metrics_extra_attempts(
     def _collect_hits(hits):
         for hit in hits:
             source = hit["_source"]
-            job_id = source.get("job", {}).get("job_info", {}).get("id", "")
+            job_id = (
+                source.get("job", {})
+                .get("job_info", {})
+                .get("job_payload", {})
+                .get("payload_task_id", "")
+            )
             if job_id:
                 metrics_docs.setdefault(job_id, []).append(source)
 
