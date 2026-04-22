@@ -1,7 +1,15 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git diff:*)"
+      "Bash(git diff:*)",
+      "mcp__maap-platform-local__list_batches",
+      "mcp__maap-platform-local__search_jobs",
+      "Bash(git add *)",
+      "Bash(git commit *)"
     ]
-  }
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "maap-platform-local"
+  ]
 }

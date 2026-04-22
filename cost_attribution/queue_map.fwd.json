@@ -1,0 +1,15 @@
+{
+  "smap-pge-radiometer": "smap-pge-radiometer-workflow",
+  "smap-ingest-file": ["smap-bulk-ingest-file", "smap-ingest-file"],
+  "smap-pge-preprocessor": "smap-pge-preprocessor-workflow",
+  "smap-trigger": ["smap-timer", "smap-pge-sentinel-preprocessor-workflow"],
+  "smap-l0a-pge": "smap-l0a-ingest-file",
+  "smap-pge-radar": "smap-pge-radar-workflow",
+  "smap-pge-enhanced": "smap-pge-enhanced-workflow",
+  "smap-pge-daily": "smap-pge-daily-workflow",
+  "smap-pge-sentinel": "smap-pge-sentinel-workflow",
+  "smap-pge-sentinel-preprocessor": "smap-pge-sentinel-preprocessor-workflow",
+  "smap-pge-job_worker-128gb": "smap-pge-job_worker-128gb-worker",
+  "smap-timer": "smap-trigger"
+}
+

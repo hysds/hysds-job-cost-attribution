@@ -1,2 +1,6 @@
 *.pyc
 .vscode/launch.json
+fwd-costs.smap.txt
+.mcp.json
+.claude/settings.local.json
+.gitignore
