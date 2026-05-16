@@ -21,6 +21,7 @@ from .calculator import (
 )
 from .mozart_client import fetch_all_jobs, fetch_metrics_extra_attempts
 from .redis_publisher import publish_documents, check_redis_connection
+from .metrics_publisher import bulk_index_documents, check_metrics_connection
 from .schema import build_job_cost_document, build_queue_overhead_document
 from .utils import asg_name_to_queue, apply_queue_map, filter_skipped_job_types, load_queue_map, safe_get
 
@@ -47,6 +48,7 @@ def build_config(
     region: str,
     use_fallback: bool,
     cost_metric: str = "AmortizedCost",
+    publish_mode: str = "redis",
 ) -> AttributionConfig:
     """Build AttributionConfig for the given date."""
     target_date = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -63,7 +65,27 @@ def build_config(
         aws_region=region,
         use_fallback_pricing=use_fallback,
         cost_metric=cost_metric,
+        publish_mode=publish_mode,
     )
+
+
+def preflight_publish(config: AttributionConfig) -> None:
+    """Verify the configured publish target is reachable."""
+    if config.publish_mode == "direct":
+        if not check_metrics_connection(config):
+            raise click.ClickException(
+                "Cannot connect to metrics OpenSearch. Check --metrics settings."
+            )
+    else:
+        if not check_redis_connection(config):
+            raise click.ClickException("Cannot connect to Redis. Check connection settings.")
+
+
+def publish(documents: list[dict], config: AttributionConfig) -> int:
+    """Dispatch to the configured publisher (redis or direct bulk)."""
+    if config.publish_mode == "direct":
+        return bulk_index_documents(documents, config)
+    return publish_documents(documents, config)
 
 
 def run_hourly_estimator(
@@ -73,6 +95,7 @@ def run_hourly_estimator(
     verbose: bool,
     skip_job_types: tuple[str, ...] = (),
     cost_metric: str = "AmortizedCost",
+    publish_mode: str = "redis",
 ) -> None:
     """Hourly estimator: cost recent terminal jobs that lack cost documents.
 
@@ -101,7 +124,11 @@ def run_hourly_estimator(
         aws_region=region,
         use_fallback_pricing=True,  # No CE in estimator mode
         cost_metric=cost_metric,
+        publish_mode=publish_mode,
     )
+
+    if not dry_run:
+        preflight_publish(config)
 
     # Fetch terminal jobs from last 48h
     jobs = fetch_all_jobs(config)
@@ -218,8 +245,8 @@ def run_hourly_estimator(
                 doc.get("cost_inputs", {}).get("pricing_source"),
             )
     else:
-        published = publish_documents(documents, config)
-        logger.info("Published %d estimate documents", published)
+        published = publish(documents, config)
+        logger.info("Published %d estimate documents (mode=%s)", published, config.publish_mode)
 
     click.echo(f"\nHourly Estimator Summary")
     click.echo(f"{'=' * 40}")
@@ -247,6 +274,7 @@ def run_date_range(
     skip_job_types: tuple[str, ...] = (),
     cost_metric: str = "AmortizedCost",
     queue_map: dict[str, str] | None = None,
+    publish_mode: str = "redis",
 ) -> None:
     """Backfill cost attribution across a date range with a single CE call.
 
@@ -279,11 +307,10 @@ def run_date_range(
     # CE end_date is exclusive, so add 1 day
     ce_end_exclusive = (dt_end + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # Step 1: Check Redis connectivity (unless dry run)
-    temp_config = build_config(start_date, redis_password, asg_prefix, region, use_fallback, cost_metric)
+    # Step 1: Check publisher connectivity (unless dry run)
+    temp_config = build_config(start_date, redis_password, asg_prefix, region, use_fallback, cost_metric, publish_mode)
     if not dry_run:
-        if not check_redis_connection(temp_config):
-            raise click.ClickException("Cannot connect to Redis. Check connection settings.")
+        preflight_publish(temp_config)
 
     # Step 2: Fetch CE costs for full range in ONE call
     costs_by_day: dict[str, dict[str, float]] = {}
@@ -307,6 +334,7 @@ def run_date_range(
         aws_region=region,
         use_fallback_pricing=use_fallback,
         cost_metric=cost_metric,
+        publish_mode=publish_mode,
     )
     all_jobs = fetch_all_jobs(range_config)
     logger.info("Fetched %d total jobs for full range", len(all_jobs))
@@ -363,7 +391,7 @@ def run_date_range(
             continue
 
         # Build per-day config
-        day_config = build_config(day_str, redis_password, asg_prefix, region, use_fallback, cost_metric)
+        day_config = build_config(day_str, redis_password, asg_prefix, region, use_fallback, cost_metric, publish_mode)
 
         # Compute queue_total_seconds for this day's jobs
         queue_total_seconds: dict[str, float] = defaultdict(float)
@@ -487,10 +515,10 @@ def run_date_range(
         return
 
     if dry_run:
-        logger.info("DRY RUN -- skipping Redis publish of %d documents", len(all_documents))
+        logger.info("DRY RUN -- skipping publish of %d documents", len(all_documents))
     else:
-        published = publish_documents(all_documents, temp_config)
-        logger.info("Published %d documents to Redis", published)
+        published = publish(all_documents, temp_config)
+        logger.info("Published %d documents (mode=%s)", published, temp_config.publish_mode)
 
     # Step 7: Summary
     total_days = (dt_end - dt_start).days + 1
@@ -519,7 +547,8 @@ def run_date_range(
     if dry_run:
         click.echo("Mode:                DRY RUN (not published)")
     else:
-        click.echo("Mode:                PUBLISHED to Redis")
+        target = "metrics OpenSearch (direct bulk)" if temp_config.publish_mode == "direct" else "Redis"
+        click.echo(f"Mode:                PUBLISHED to {target}")
 
 
 @click.command()
@@ -590,6 +619,19 @@ def run_date_range(
          "E.g., --skip-job-types job-workflow skips all job-workflow:* jobs.",
 )
 @click.option(
+    "--direct",
+    "publish_mode_flag",
+    flag_value="direct",
+    default=None,
+    help="Bulk-index documents directly to the metrics OpenSearch cluster, bypassing Redis/Logstash.",
+)
+@click.option(
+    "--redis",
+    "publish_mode_flag",
+    flag_value="redis",
+    help="Publish documents via Redis for Logstash ingestion (default).",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
@@ -613,6 +655,7 @@ def main(
     estimate_recent: bool,
     include_retries: bool,
     skip_job_types: tuple[str, ...],
+    publish_mode_flag: str | None,
     dry_run: bool,
     verbose: bool,
 ) -> None:
@@ -622,6 +665,8 @@ def main(
     results to Redis for Logstash → OpenSearch ingestion.
     """
     setup_logging(verbose)
+
+    publish_mode = publish_mode_flag or "redis"
 
     # Load queue map if provided
     queue_map = load_queue_map(queue_map_file) if queue_map_file else None
@@ -638,6 +683,7 @@ def main(
             verbose=verbose,
             skip_job_types=skip_job_types,
             cost_metric=cost_metric,
+            publish_mode=publish_mode,
         )
         return
 
@@ -654,6 +700,7 @@ def main(
             skip_job_types=skip_job_types,
             cost_metric=cost_metric,
             queue_map=queue_map,
+            publish_mode=publish_mode,
         )
         return
 
@@ -663,14 +710,13 @@ def main(
         date = target.strftime("%Y-%m-%d")
 
     logger.info("Starting cost attribution for %s", date)
-    config = build_config(date, redis_password, asg_prefix, region, use_fallback, cost_metric)
+    config = build_config(date, redis_password, asg_prefix, region, use_fallback, cost_metric, publish_mode)
     logger.info("Run ID: %s", config.run_id)
     logger.info("Window: %s → %s", config.window_start, config.window_end)
 
-    # Step 1: Check Redis connectivity (unless dry run)
+    # Step 1: Check publisher connectivity (unless dry run)
     if not dry_run:
-        if not check_redis_connection(config):
-            raise click.ClickException("Cannot connect to Redis. Check connection settings.")
+        preflight_publish(config)
 
     # Step 2: Fetch jobs from Mozart
     jobs = fetch_all_jobs(config)
@@ -812,15 +858,14 @@ def main(
         len(documents), len(job_costs), len(documents) - len(job_costs),
     )
 
-    # Step 10: Publish to Redis
+    # Step 10: Publish
     if dry_run:
-        logger.info("DRY RUN — skipping Redis publish")
-        # Print summary
+        logger.info("DRY RUN — skipping publish")
         for doc in documents[:3]:
             logger.debug("Sample document: %s", doc.get("doc_type"))
     else:
-        published = publish_documents(documents, config)
-        logger.info("Published %d documents to Redis", published)
+        published = publish(documents, config)
+        logger.info("Published %d documents (mode=%s)", published, config.publish_mode)
 
     # Summary
     click.echo(f"\nCost Attribution Summary for {date}")
@@ -843,7 +888,8 @@ def main(
     if dry_run:
         click.echo("Mode:              DRY RUN (not published)")
     else:
-        click.echo("Mode:              PUBLISHED to Redis")
+        target = "metrics OpenSearch (direct bulk)" if config.publish_mode == "direct" else "Redis"
+        click.echo(f"Mode:              PUBLISHED to {target}")
 
 
 if __name__ == "__main__":

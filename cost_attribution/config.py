@@ -63,6 +63,10 @@ class AttributionConfig:
     # Batch size for Redis pushes
     redis_batch_size: int = 500
 
+    # Publish mode: "redis" (default, via Logstash) or "direct" (bulk to metrics OpenSearch)
+    publish_mode: str = "redis"
+    bulk_batch_size: int = 500
+
     # Cost Explorer
     use_fallback_pricing: bool = False  # Force fallback pricing
     cost_metric: str = "AmortizedCost"  # UnblendedCost, AmortizedCost, or BlendedCost
