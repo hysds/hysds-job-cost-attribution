@@ -336,6 +336,101 @@ If `--queue-map-file` is not provided, the tool attempts to match CE ASG names t
 
 ---
 
+## Logstash Setup (Redis publish mode)
+
+The Redis publish mode requires two changes to the existing `metrics/etc/indexer.conf`.
+
+### 1 — Add a third Redis input
+
+In the `input { }` block, alongside the existing `logstash` and `sdswatch` inputs, add:
+
+```
+redis {
+  host      => "127.0.0.1"
+  password  => "xxx"
+  data_type => "list"
+  key       => "cost-attribution"
+  codec     => msgpack
+  # No add_field — @index is already set in the published document
+}
+```
+
+### 2 — Update the output block
+
+Replace the existing `output { }` block with one that routes `job-cost-attribution-*` documents using `document_id` (required for idempotent writes / deduplication):
+
+```
+output {
+  if [@index] =~ /^job-cost-attribution/ {
+    opensearch {
+      hosts       => ["http://127.0.0.1:9200"]
+      index       => "%{[@index]}"
+      document_id => "%{[doc_id]}"
+      action      => "index"
+    }
+  } else {
+    opensearch {
+      hosts => ["http://127.0.0.1:9200"]
+      index => "%{[@index]}"
+    }
+  }
+}
+```
+
+### Full resulting conf
+
+```
+input {
+  redis {
+    host     => "127.0.0.1"
+    password => "xxx"
+    data_type => "list"
+    key      => "logstash"
+    codec    => msgpack
+    add_field => {
+      "@index" => "logstash-%{+yyyy.MM.dd}"
+    }
+  }
+
+  redis {
+    host      => "127.0.0.1"
+    password  => "xxx"
+    data_type => "list"
+    key       => "sdswatch"
+    add_field => {
+      "@index" => "sdswatch-%{+yyyy.MM.dd}"
+    }
+  }
+
+  redis {
+    host      => "127.0.0.1"
+    password  => "xxx"
+    data_type => "list"
+    key       => "cost-attribution"
+    codec     => msgpack
+    # No add_field — @index is already set in the document
+  }
+}
+
+output {
+  if [@index] =~ /^job-cost-attribution/ {
+    opensearch {
+      hosts       => ["http://127.0.0.1:9200"]
+      index       => "%{[@index]}"
+      document_id => "%{[doc_id]}"
+      action      => "index"
+    }
+  } else {
+    opensearch {
+      hosts => ["http://127.0.0.1:9200"]
+      index => "%{[@index]}"
+    }
+  }
+}
+```
+
+---
+
 ## SMAP FWD Example
 
 Backfill February 2026 costs for the SMAP FWD deployment, skipping lightweight pre-processing job types, with retry attempts included:

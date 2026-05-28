@@ -1,0 +1,80 @@
+{
+  "index_patterns": ["job-cost-attribution-*"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 1
+    },
+    "mappings": {
+      "properties": {
+        "@timestamp":      { "type": "date" },
+        "doc_id":          { "type": "keyword" },
+        "doc_type":        { "type": "keyword" },
+        "attribution_window": {
+          "properties": {
+            "start":  { "type": "date" },
+            "end":    { "type": "date" },
+            "run_id": { "type": "keyword" }
+          }
+        },
+        "job_id":               { "type": "keyword" },
+        "job_type":             { "type": "keyword" },
+        "job_version":          { "type": "keyword" },
+        "algorithm":            { "type": "keyword" },
+        "container":            { "type": "keyword" },
+        "username":             { "type": "keyword" },
+        "queue":                { "type": "keyword" },
+        "tag":                  { "type": "keyword" },
+        "status":               { "type": "keyword" },
+        "instance_id":          { "type": "keyword" },
+        "instance_type":        { "type": "keyword" },
+        "availability_zone":    { "type": "keyword" },
+        "is_retry_attempt":     { "type": "boolean" },
+        "timing": {
+          "properties": {
+            "queued":             { "type": "date" },
+            "started":            { "type": "date" },
+            "ended":              { "type": "date" },
+            "duration_seconds":   { "type": "double" },
+            "queue_wait_seconds": { "type": "double" }
+          }
+        },
+        "cost": {
+          "properties": {
+            "total":       { "type": "double" },
+            "ec2_compute": { "type": "double" },
+            "ebs_storage": { "type": "double" },
+            "s3_output":   { "type": "double" },
+            "ec2_idle":    { "type": "double" },
+            "ebs_idle":    { "type": "double" }
+          }
+        },
+        "cost_inputs": {
+          "properties": {
+            "ec2_hourly_rate":    { "type": "double" },
+            "ec2_pricing_source": { "type": "keyword" },
+            "output_bytes":       { "type": "long" },
+            "pricing_source":     { "type": "keyword" },
+            "cost_metric":        { "type": "keyword" },
+            "last_updated":       { "type": "date" }
+          }
+        },
+        "resource_usage": {
+          "properties": {
+            "cpu_total_ns":      { "type": "long" },
+            "memory_max_bytes":  { "type": "long" }
+          }
+        },
+        "overhead_details": {
+          "properties": {
+            "total_instance_hours": { "type": "double" },
+            "total_job_hours":      { "type": "double" },
+            "idle_pct":             { "type": "double" },
+            "instance_count":       { "type": "integer" },
+            "job_count":            { "type": "integer" }
+          }
+        }
+      }
+    }
+  }
+}
