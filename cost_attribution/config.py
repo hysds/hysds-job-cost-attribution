@@ -1,5 +1,6 @@
 """Configuration for the cost attribution batch process."""
 
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -8,15 +9,16 @@ S3_STORAGE_RATE_PER_GB_MONTH = 0.023
 S3_PUT_REQUEST_RATE_PER_1000 = 0.005
 DAYS_PER_MONTH = 30
 
-# OpenSearch hosts
-MOZART_HOST = "localhost"
-MOZART_PORT = 9300
-METRICS_HOST = "localhost"
-METRICS_PORT = 9400
+# OpenSearch hosts (override via MOZART_HOST/MOZART_PORT/METRICS_HOST/METRICS_PORT env vars,
+# e.g. when running against a remote cluster instead of localhost)
+MOZART_HOST = os.environ.get("MOZART_HOST", "localhost")
+MOZART_PORT = int(os.environ.get("MOZART_PORT", "9300"))
+METRICS_HOST = os.environ.get("METRICS_HOST", "localhost")
+METRICS_PORT = int(os.environ.get("METRICS_PORT", "9400"))
 
-# Redis settings
-REDIS_HOST = "127.0.0.1"
-REDIS_PORT = 6379
+# Redis settings (override via REDIS_HOST/REDIS_PORT env vars)
+REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 REDIS_KEY = "cost-attribution"
 
 # Job index pattern

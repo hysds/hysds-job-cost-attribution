@@ -21,14 +21,15 @@ pip install -r cost_attribution/requirements.txt
 
 ## Configuration
 
-Connection defaults (overridable via CLI flags):
+Connection defaults (override via environment variables — useful when running against a remote cluster, e.g. in a CI/cron job that isn't co-located with Mozart/Metrics/Redis):
 
-| Service | Default |
-|---|---|
-| Mozart OpenSearch | `localhost:9300` |
-| Metrics OpenSearch | `localhost:9400` |
-| Redis host | `127.0.0.1:6379` |
-| AWS region | `us-west-2` |
+| Service | Default | Env var(s) |
+|---|---|---|
+| Mozart OpenSearch | `localhost:9300` | `MOZART_HOST`, `MOZART_PORT` |
+| Metrics OpenSearch | `localhost:9400` | `METRICS_HOST`, `METRICS_PORT` |
+| Redis host | `127.0.0.1:6379` | `REDIS_HOST`, `REDIS_PORT` |
+| Redis password | none | `REDIS_PASSWORD` (or `--redis-password`) |
+| AWS region | `us-west-2` | `--region` flag |
 
 AWS credentials are resolved via the standard boto3 chain (env vars → `~/.aws/credentials` → IAM role). The IAM role or user needs `ce:GetCostAndUsage` and EC2/Pricing read permissions.
 
