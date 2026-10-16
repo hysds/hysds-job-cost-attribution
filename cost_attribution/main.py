@@ -1,4 +1,5 @@
 """CLI entry point for the cost attribution batch process."""
+import json
 import logging
 import uuid
 from collections import defaultdict
@@ -6,24 +7,30 @@ from datetime import datetime, timedelta, timezone
 
 import click
 
-from .config import AttributionConfig
+from .config import AttributionConfig, CE_HOURLY_RETENTION_DAYS, HOURLY_JOB_PAD_DAYS
 from .cost_explorer import (
     create_ce_client,
     fetch_queue_costs,
     fetch_queue_costs_by_day,
+    fetch_queue_usage,
     fetch_ondemand_hourly_rates,
     fetch_spot_hourly_rates,
 )
 from .calculator import (
+    build_cost_breakdown,
     calculate_job_cost,
     calculate_queue_overhead,
     compute_queue_totals,
 )
+from .hourly_allocation import allocate_hourly
 from .mozart_client import fetch_all_jobs, fetch_metrics_extra_attempts
 from .redis_publisher import publish_documents, check_redis_connection
 from .metrics_publisher import bulk_index_documents, check_metrics_connection
 from .schema import build_job_cost_document, build_queue_overhead_document
-from .utils import asg_name_to_queue, apply_queue_map, filter_skipped_job_types, load_queue_map, safe_get
+from .utils import (
+    asg_name_to_queue, apply_queue_map, filter_skipped_job_types, job_billed_seconds,
+    load_queue_map, safe_get,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +95,15 @@ def publish(documents: list[dict], config: AttributionConfig) -> int:
     return publish_documents(documents, config)
 
 
+def write_documents_json(documents: list[dict], path: str) -> int:
+    """Write documents as JSON Lines (one document per line), exactly as they would be published."""
+    with open(path, "w") as f:
+        for doc in documents:
+            f.write(json.dumps(doc, default=str) + "\n")
+    logger.info("Wrote %d documents to %s", len(documents), path)
+    return len(documents)
+
+
 def run_hourly_estimator(
     region: str,
     asg_prefix: str,
@@ -96,6 +112,7 @@ def run_hourly_estimator(
     skip_job_types: tuple[str, ...] = (),
     cost_metric: str = "AmortizedCost",
     publish_mode: str = "redis",
+    output_json: str | None = None,
 ) -> None:
     """Hourly estimator: cost recent terminal jobs that lack cost documents.
 
@@ -235,6 +252,8 @@ def run_hourly_estimator(
     )
 
     # Publish
+    if output_json:
+        write_documents_json(documents, output_json)
     if dry_run:
         logger.info("DRY RUN — skipping publish")
         for doc in documents[:3]:
@@ -256,6 +275,8 @@ def run_hourly_estimator(
     click.echo(f"Newly estimated:   {len(documents)}")
     click.echo(f"Estimated total:   ${total_cost:.4f}")
     click.echo(f"Run ID:            {run_id}")
+    if output_json:
+        click.echo(f"JSON output:       {output_json}")
     if dry_run:
         click.echo("Mode:              DRY RUN (not published)")
     else:
@@ -275,6 +296,7 @@ def run_date_range(
     cost_metric: str = "AmortizedCost",
     queue_map: dict[str, str] | None = None,
     publish_mode: str = "redis",
+    output_json: str | None = None,
 ) -> None:
     """Backfill cost attribution across a date range with a single CE call.
 
@@ -397,7 +419,7 @@ def run_date_range(
         queue_total_seconds: dict[str, float] = defaultdict(float)
         for job in day_jobs:
             queue = safe_get(job, "job", "job_info", "job_queue", default="unknown")
-            duration = safe_get(job, "job", "job_info", "duration", default=0) or 0
+            duration = job_billed_seconds(job)
             queue_total_seconds[queue] += duration
 
         # Map ASG names to queue names, filter to job queues
@@ -514,6 +536,8 @@ def run_date_range(
         click.echo("No documents generated for the date range.")
         return
 
+    if output_json:
+        write_documents_json(all_documents, output_json)
     if dry_run:
         logger.info("DRY RUN -- skipping publish of %d documents", len(all_documents))
     else:
@@ -544,6 +568,253 @@ def run_date_range(
     click.echo(f"Total job cost:      ${grand_total_job_cost:.4f}")
     click.echo(f"Total overhead:      ${grand_total_overhead:.4f}")
     click.echo(f"Documents:           {len(all_documents)}")
+    if output_json:
+        click.echo(f"JSON output:         {output_json}")
+    if dry_run:
+        click.echo("Mode:                DRY RUN (not published)")
+    else:
+        target = "metrics OpenSearch (direct bulk)" if temp_config.publish_mode == "direct" else "Redis"
+        click.echo(f"Mode:                PUBLISHED to {target}")
+
+
+def fetch_usage_hourly_and_daily(
+    ce_client,
+    ce_start: datetime,
+    ce_end_exclusive: datetime,
+    asg_prefix: str,
+    cost_metric: str,
+) -> tuple[dict, dict]:
+    """Fetch HOURLY usage where CE retains it, and DAILY usage for the full span."""
+    daily = fetch_queue_usage(
+        ce_client, ce_start.strftime("%Y-%m-%d"), ce_end_exclusive.strftime("%Y-%m-%d"),
+        "DAILY", asg_prefix, cost_metric,
+    )
+    logger.info("Fetched DAILY CE cost + running hours for %d days", len(daily))
+
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+    hourly_start = max(ce_start, today - timedelta(days=CE_HOURLY_RETENTION_DAYS))
+    hourly: dict = {}
+    # The retention boundary is not exact; step forward a day if CE rejects it
+    for _ in range(2):
+        if hourly_start >= ce_end_exclusive:
+            break
+        try:
+            hourly = fetch_queue_usage(
+                ce_client,
+                hourly_start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                ce_end_exclusive.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "HOURLY", asg_prefix, cost_metric,
+            )
+            break
+        except Exception as e:
+            logger.warning("HOURLY CE query from %s failed: %s", hourly_start.date(), e)
+            hourly_start += timedelta(days=1)
+    if hourly:
+        logger.info(
+            "Fetched HOURLY CE cost + running hours for %d hours (%s onward); "
+            "earlier hours use DAILY rates",
+            len(hourly), hourly_start.strftime("%Y-%m-%d"),
+        )
+    else:
+        logger.warning("No HOURLY CE data available; all hours use DAILY rates")
+    return hourly, daily
+
+
+def run_date_range_hourly(
+    start_date: str,
+    end_date: str,
+    redis_password: str | None,
+    asg_prefix: str,
+    region: str,
+    include_retries: bool,
+    dry_run: bool,
+    skip_job_types: tuple[str, ...] = (),
+    cost_metric: str = "AmortizedCost",
+    queue_map: dict[str, str] | None = None,
+    publish_mode: str = "redis",
+    output_json: str | None = None,
+    idle_to_jobs: bool = True,
+) -> None:
+    """Attribute cost per queue-hour using CE running instance-seconds.
+
+    Job documents go to the day of the job's time_end (same as the daily
+    path), but each job is charged for the hours it actually ran. With
+    idle_to_jobs, each hour's idle cost is split among the jobs that ran in
+    that hour; queue overhead documents keep only hours with no jobs.
+    Otherwise all idle cost is queue overhead.
+    """
+    logger.info("Starting hourly attribution: %s to %s", start_date, end_date)
+
+    try:
+        dt_start = datetime.strptime(start_date, "%Y-%m-%d")
+        dt_end = datetime.strptime(end_date, "%Y-%m-%d")
+    except ValueError as e:
+        raise click.ClickException(f"Invalid date format: {e}")
+    if dt_start > dt_end:
+        raise click.ClickException(f"Start date {start_date} is after end date {end_date}")
+
+    report_days = {
+        (dt_start + timedelta(days=i)).strftime("%Y-%m-%d")
+        for i in range((dt_end - dt_start).days + 1)
+    }
+    pad = timedelta(days=HOURLY_JOB_PAD_DAYS)
+    range_end_exclusive = dt_end + timedelta(days=1)
+
+    temp_config = build_config(start_date, redis_password, asg_prefix, region, False, cost_metric, publish_mode)
+    if not dry_run:
+        preflight_publish(temp_config)
+
+    # CE: from pad days before the range (jobs that started earlier) to range end
+    ce_client = create_ce_client(temp_config)
+    hourly_usage, daily_usage = fetch_usage_hourly_and_daily(
+        ce_client, dt_start - pad, range_end_exclusive, asg_prefix, temp_config.cost_metric,
+    )
+
+    # Jobs: ending pad days before the range through pad days after it. The
+    # extra jobs get no documents, but they make each hour's occupancy
+    # complete: later jobs occupy in-range hours, earlier jobs occupy the
+    # pre-range hours that range jobs which started early also ran in.
+    fetch_start = dt_start - pad
+    fetch_end = dt_end + pad
+    range_config = AttributionConfig(
+        window_start=f"{fetch_start.strftime('%Y-%m-%d')}T00:00:00Z",
+        window_end=f"{fetch_end.strftime('%Y-%m-%d')}T23:59:59Z",
+        run_id=f"hourly-{start_date}-to-{end_date}",
+        redis_password=redis_password,
+        asg_prefix=asg_prefix,
+        aws_region=region,
+        cost_metric=cost_metric,
+        publish_mode=publish_mode,
+    )
+    all_jobs = fetch_all_jobs(range_config)
+    logger.info(
+        "Fetched %d jobs ending %s to %s",
+        len(all_jobs), fetch_start.strftime("%Y-%m-%d"), fetch_end.strftime("%Y-%m-%d"),
+    )
+    if include_retries:
+        extra = fetch_metrics_extra_attempts(range_config, all_jobs)
+        if extra:
+            all_jobs.extend(extra)
+            logger.info("Added %d retry attempts, total jobs now: %d", len(extra), len(all_jobs))
+    all_jobs = filter_skipped_job_types(all_jobs, skip_job_types)
+
+    allocation = allocate_hourly(
+        all_jobs, hourly_usage, daily_usage, report_days, asg_prefix, queue_map,
+        idle_to_jobs=idle_to_jobs,
+        occupancy_complete_from=fetch_start.replace(tzinfo=timezone.utc),
+    )
+    if allocation.over_occupied_hours:
+        logger.warning(
+            "%d queue-hours had more job-seconds than CE running instance-seconds "
+            "(max ratio %.2fx); those hours are charged at cost / job-seconds: %s",
+            allocation.over_occupied_hours, allocation.max_occupancy_ratio,
+            ", ".join(f"{q} ({n})" for q, n in sorted(allocation.over_occupied_queues.items(), key=lambda x: -x[1])),
+        )
+    if allocation.unpriced_job_seconds:
+        logger.warning(
+            "%.1f job-hours in the range fell in queue-hours with no CE cost and were charged $0",
+            allocation.unpriced_job_seconds / 3600,
+        )
+
+    # Build documents per report day
+    jobs_by_day: dict[str, list[tuple[dict, dict]]] = defaultdict(list)
+    for job, alloc in zip(all_jobs, allocation.job_costs):
+        time_end = safe_get(job, "job", "job_info", "time_end")
+        if time_end and str(time_end)[:10] in report_days:
+            jobs_by_day[str(time_end)[:10]].append((job, alloc))
+
+    all_documents: list[dict] = []
+    grand = defaultdict(float)
+    report_jobs = 0
+
+    for day_str in sorted(report_days):
+        day_config = build_config(day_str, redis_password, asg_prefix, region, False, cost_metric, publish_mode)
+        day_job_cost = 0.0
+        for job, alloc in jobs_by_day.get(day_str, []):
+            cost = build_cost_breakdown(
+                job, alloc["ec2_compute"], 0.0, alloc["ec2_hourly_rate"], alloc["pricing_source"],
+                ec2_idle_share=alloc["ec2_idle_share"],
+            )
+            day_job_cost += cost["total"]
+            all_documents.append(build_job_cost_document(
+                job, cost, day_config.window_start, day_config.window_end,
+                day_config.run_id, cost_metric=day_config.cost_metric,
+            ))
+        report_jobs += len(jobs_by_day.get(day_str, []))
+
+        day_queue_cost = day_overhead = day_in_day_job_cost = 0.0
+        for (queue, qd_day), qd in sorted(allocation.queue_days.items()):
+            if qd_day != day_str:
+                continue
+            overhead = calculate_queue_overhead(
+                queue=queue,
+                total_instance_cost=qd.cost,
+                total_job_ec2_cost=qd.job_cost,
+                total_ebs_cost=0.0,             # EBS bundled into CE tag cost
+                total_job_ebs_cost=0.0,
+                total_instance_hours=qd.instance_seconds / 3600,
+                total_job_hours=qd.job_seconds / 3600,
+                instance_count=len(qd.instances),
+                job_count=len(qd.job_ids),
+            )
+            overhead["overhead_details"]["idle_redistributed_to_jobs"] = round(qd.idle_to_jobs, 6)
+            all_documents.append(build_queue_overhead_document(
+                overhead, day_config.window_start, day_config.window_end,
+                day_config.run_id, cost_metric=day_config.cost_metric,
+            ))
+            day_queue_cost += qd.cost
+            grand["idle_to_jobs"] += qd.idle_to_jobs
+            day_in_day_job_cost += qd.job_cost
+            day_overhead += overhead["cost"]["total"]
+
+        day_infra = allocation.infra_by_day.get(day_str, 0.0)
+        grand["job_cost"] += day_job_cost
+        grand["queue_cost"] += day_queue_cost
+        grand["in_range_job_cost"] += day_in_day_job_cost
+        grand["overhead"] += day_overhead
+        grand["infra"] += day_infra
+        logger.info(
+            "Day %s: %d jobs, $%.4f job cost, $%.4f idle overhead, $%.4f queue CE, $%.4f infra (excl)",
+            day_str, len(jobs_by_day.get(day_str, [])), day_job_cost, day_overhead,
+            day_queue_cost, day_infra,
+        )
+
+    if not all_documents:
+        click.echo("No documents generated for the date range.")
+        return
+
+    if output_json:
+        write_documents_json(all_documents, output_json)
+    if dry_run:
+        logger.info("DRY RUN -- skipping publish of %d documents", len(all_documents))
+    else:
+        published = publish(all_documents, temp_config)
+        logger.info("Published %d documents (mode=%s)", published, temp_config.publish_mode)
+
+    retry_count = sum(
+        1 for day_jobs in jobs_by_day.values() for job, _ in day_jobs if job.get("is_retry_attempt")
+    )
+    reconcile_diff = grand["queue_cost"] - grand["in_range_job_cost"] - grand["overhead"]
+
+    click.echo(f"\nHourly Attribution Summary: {start_date} to {end_date}")
+    click.echo(f"{'=' * 55}")
+    click.echo(f"Cost metric:         {cost_metric}")
+    click.echo(f"Hours priced hourly: {len(hourly_usage)}")
+    click.echo(f"Total jobs:          {report_jobs}")
+    if include_retries:
+        click.echo(f"  Retry attempts:    {retry_count}")
+    click.echo(f"CE total (all):      ${grand['queue_cost'] + grand['infra']:.4f}")
+    click.echo(f"  Job queues:        ${grand['queue_cost']:.4f}")
+    click.echo(f"    Job hours:       ${grand['in_range_job_cost']:.4f}")
+    if idle_to_jobs:
+        click.echo(f"      (idle split to jobs: ${grand['idle_to_jobs']:.4f})")
+    click.echo(f"    Idle overhead:   ${grand['overhead']:.4f}" + ("  (hours with no jobs)" if idle_to_jobs else ""))
+    click.echo(f"    Unreconciled:    ${reconcile_diff:.4f}")
+    click.echo(f"  Infra (excl):      ${grand['infra']:.4f}  (pcm-*, etc.)")
+    click.echo(f"Total job cost:      ${grand['job_cost']:.4f}  (incl. S3 and hours outside the range)")
+    click.echo(f"Documents:           {len(all_documents)}")
+    if output_json:
+        click.echo(f"JSON output:         {output_json}")
     if dry_run:
         click.echo("Mode:                DRY RUN (not published)")
     else:
@@ -632,10 +903,31 @@ def run_date_range(
     help="Publish documents via Redis for Logstash ingestion (default).",
 )
 @click.option(
+    "--hourly",
+    is_flag=True,
+    default=False,
+    help="Allocate per queue-hour from CE hourly cost / running instance-seconds; "
+         "idle time becomes queue overhead. Hours older than 14 days use daily rates.",
+)
+@click.option(
+    "--hourly-idle",
+    type=click.Choice(["jobs", "overhead"]),
+    default="jobs",
+    show_default=True,
+    help="With --hourly: 'jobs' splits each hour's idle cost among the jobs that ran "
+         "that hour (per second); 'overhead' leaves it as queue overhead.",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
     help="Calculate costs but don't publish to Redis.",
+)
+@click.option(
+    "--output-json",
+    type=click.Path(dir_okay=False, writable=True),
+    default=None,
+    help="Write all documents to FILE as JSON Lines instead of publishing (implies --dry-run).",
 )
 @click.option(
     "--verbose", "-v",
@@ -656,7 +948,10 @@ def main(
     include_retries: bool,
     skip_job_types: tuple[str, ...],
     publish_mode_flag: str | None,
+    hourly: bool,
+    hourly_idle: str,
     dry_run: bool,
+    output_json: str | None,
     verbose: bool,
 ) -> None:
     """MAAP HySDS Job Cost Attribution Batch Process.
@@ -667,6 +962,10 @@ def main(
     setup_logging(verbose)
 
     publish_mode = publish_mode_flag or "redis"
+
+    # JSON output replaces publishing
+    if output_json:
+        dry_run = True
 
     # Load queue map if provided
     queue_map = load_queue_map(queue_map_file) if queue_map_file else None
@@ -684,6 +983,30 @@ def main(
             skip_job_types=skip_job_types,
             cost_metric=cost_metric,
             publish_mode=publish_mode,
+            output_json=output_json,
+        )
+        return
+
+    if hourly:
+        if use_fallback:
+            raise click.ClickException("--hourly requires Cost Explorer; it cannot be combined with --use-fallback.")
+        if date is None and not date_range:
+            date = (datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%d")
+        start, end = date_range if date_range else (date, date)
+        run_date_range_hourly(
+            start_date=start,
+            end_date=end,
+            redis_password=redis_password,
+            asg_prefix=asg_prefix,
+            region=region,
+            include_retries=include_retries,
+            dry_run=dry_run,
+            skip_job_types=skip_job_types,
+            cost_metric=cost_metric,
+            queue_map=queue_map,
+            publish_mode=publish_mode,
+            output_json=output_json,
+            idle_to_jobs=hourly_idle == "jobs",
         )
         return
 
@@ -701,6 +1024,7 @@ def main(
             cost_metric=cost_metric,
             queue_map=queue_map,
             publish_mode=publish_mode,
+            output_json=output_json,
         )
         return
 
@@ -738,7 +1062,7 @@ def main(
     queue_total_seconds: dict[str, float] = defaultdict(float)
     for job in jobs:
         queue = safe_get(job, "job", "job_info", "job_queue", default="unknown")
-        duration = safe_get(job, "job", "job_info", "duration", default=0) or 0
+        duration = job_billed_seconds(job)
         queue_total_seconds[queue] += duration
 
     # Step 4: Fetch costs from Cost Explorer (single tag-grouped call)
@@ -859,6 +1183,8 @@ def main(
     )
 
     # Step 10: Publish
+    if output_json:
+        write_documents_json(documents, output_json)
     if dry_run:
         logger.info("DRY RUN — skipping publish")
         for doc in documents[:3]:
@@ -885,6 +1211,8 @@ def main(
     click.echo(f"Queues:            {len(queue_totals)}")
     click.echo(f"Documents:         {len(documents)}")
     click.echo(f"Run ID:            {config.run_id}")
+    if output_json:
+        click.echo(f"JSON output:       {output_json}")
     if dry_run:
         click.echo("Mode:              DRY RUN (not published)")
     else:

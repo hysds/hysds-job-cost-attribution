@@ -31,6 +31,22 @@ TERMINAL_STATUSES = [
     "job-revoked",
 ]
 
+# Retry attempt lookup in the metrics cluster
+# Metrics @timestamp can lag an attempt's time_end, so the search window is
+# padded on both sides and attempts are then filtered by their own time_end.
+METRICS_RETRY_PAD_HOURS = 24
+# Max payload IDs per Mozart terms query (well under index.max_terms_count)
+MOZART_ID_BATCH_SIZE = 1000
+
+# Hourly allocation (--hourly)
+# CE keeps HOURLY granularity for 14 days; older hours fall back to the daily
+# cost / daily running-instance-seconds rate (DAILY data is kept 13 months).
+CE_HOURLY_RETENTION_DAYS = 14
+# Jobs can span day boundaries: fetch CE data this many days before the range
+# (for jobs that started earlier) and jobs ending this many days after it
+# (so their in-range hours count toward instance occupancy).
+HOURLY_JOB_PAD_DAYS = 2
+
 
 @dataclass
 class AttributionConfig:

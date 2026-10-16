@@ -4,7 +4,7 @@ import json
 import logging
 import re
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -66,11 +66,67 @@ def format_date_index(dt: datetime) -> str:
 
 
 def iso_to_datetime(iso_str: str) -> datetime:
-    """Parse ISO 8601 string to timezone-aware datetime."""
-    # Handle both Z and +00:00 suffixes
+    """Parse ISO 8601 string to timezone-aware datetime (naive input is treated as UTC)."""
+    # Handle both Z and +00:00 suffixes (HySDS metrics sometimes emit "+00:00Z")
     if iso_str.endswith("Z"):
-        iso_str = iso_str[:-1] + "+00:00"
-    return datetime.fromisoformat(iso_str)
+        iso_str = iso_str[:-1]
+        if not re.search(r"[+-]\d{2}:\d{2}$", iso_str):
+            iso_str += "+00:00"
+    parsed = datetime.fromisoformat(iso_str)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def job_run_interval(job: dict[str, Any]) -> tuple[datetime, datetime] | None:
+    """Return the (start, end) interval a job occupied its worker.
+
+    start = job_info.time_start (set in hysds job_worker.run_job before image
+    pull, input localization and the docker command).
+    end = the later of job_info.time_end and the last products_staged time_end:
+    HySDS sets time_end before the built-in publish post-processor uploads
+    outputs, so the upload would otherwise be counted as idle.
+
+    Falls back to time_end - duration when time_start is missing. Returns None
+    when the interval can't be determined.
+    """
+    info = safe_get(job, "job", "job_info", default={}) or {}
+    time_end = info.get("time_end")
+    if not time_end:
+        return None
+    try:
+        end = iso_to_datetime(str(time_end))
+        if info.get("time_start"):
+            start = iso_to_datetime(str(info["time_start"]))
+        else:
+            start = end - timedelta(seconds=info.get("duration", 0) or 0)
+    except (ValueError, TypeError):
+        return None
+
+    staged = safe_get(info, "metrics", "products_staged") or []
+    for product in staged if isinstance(staged, list) else []:
+        staged_end = (product or {}).get("time_end")
+        if not staged_end:
+            continue
+        try:
+            end = max(end, iso_to_datetime(str(staged_end)))
+        except (ValueError, TypeError):
+            continue
+
+    if end <= start:
+        return None
+    return start, end
+
+
+def job_billed_seconds(job: dict[str, Any]) -> float:
+    """Seconds a job occupied its worker: run interval incl. output upload.
+
+    Falls back to job_info.duration when the interval can't be determined.
+    """
+    interval = job_run_interval(job)
+    if interval:
+        return (interval[1] - interval[0]).total_seconds()
+    return safe_get(job, "job", "job_info", "duration", default=0) or 0
 
 
 def filter_skipped_job_types(

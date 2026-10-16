@@ -10,7 +10,7 @@ from .config import (
     DAYS_PER_MONTH,
 )
 from .cost_explorer import get_instance_daily_cost
-from .utils import safe_get, compute_s3_cost
+from .utils import safe_get, compute_s3_cost, job_billed_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ def calculate_job_cost(
     """
     instance_id = job.get("ec2_instance_id", "")
     instance_type = job.get("ec2_instance_type", "")
-    duration = safe_get(job, "job", "job_info", "duration", default=0) or 0
+    duration = job_billed_seconds(job)
     queue = safe_get(job, "job", "job_info", "job_queue", default="unknown")
 
     if queue_costs is not None:
@@ -95,7 +95,22 @@ def calculate_job_cost(
         else:
             ebs_storage = 0.0
 
-    # --- S3 Output ---
+    return build_cost_breakdown(job, ec2_compute, ebs_storage, ec2_hourly_rate, pricing_source)
+
+
+def build_cost_breakdown(
+    job: dict[str, Any],
+    ec2_compute: float,
+    ebs_storage: float,
+    ec2_hourly_rate: float,
+    pricing_source: str,
+    ec2_idle_share: float = 0.0,
+) -> dict[str, Any]:
+    """Add S3 output cost to the infra cost and return the job cost breakdown.
+
+    ec2_idle_share is the part of ec2_compute that is redistributed queue idle
+    time (hourly allocation only); it is informational, not added again.
+    """
     products = safe_get(job, "job", "job_info", "metrics", "products_staged") or []
     output_bytes = sum(
         p.get("disk_usage", 0) or 0 for p in products
@@ -107,6 +122,7 @@ def calculate_job_cost(
 
     return {
         "ec2_compute": round(ec2_compute, 6),
+        "ec2_idle_share": round(ec2_idle_share, 6),
         "ebs_storage": round(ebs_storage, 6),
         "s3_output": round(s3_output, 6),
         "total": round(total, 6),
@@ -172,7 +188,7 @@ def compute_queue_totals(
 
     for job, cost in zip(jobs, job_costs):
         queue = safe_get(job, "job", "job_info", "job_queue", default="unknown")
-        duration = safe_get(job, "job", "job_info", "duration", default=0) or 0
+        duration = job_billed_seconds(job)
 
         if queue not in totals:
             totals[queue] = {
