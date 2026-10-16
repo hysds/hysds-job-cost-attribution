@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 850 560" width="850" height="560" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="12">
+  <defs>
+    <pattern id="idle" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="6" height="6" fill="#e2e8f0"/>
+      <line x1="0" y1="0" x2="0" y2="6" stroke="#94a3b8" stroke-width="2"/>
+    </pattern>
+    <pattern id="retry" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="6" height="6" fill="#bfdbfe"/>
+      <line x1="0" y1="0" x2="0" y2="6" stroke="#3b82f6" stroke-width="2.5"/>
+    </pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <rect width="850" height="560" fill="#ffffff"/>
+
+  <!-- Title -->
+  <text x="20" y="30" font-size="17" font-weight="600" fill="#0f172a">How one queue's hourly bill is shared, second by second</text>
+  <text x="20" y="50" fill="#475569">Each instance runs one job at a time. Every hour's bill is split among the jobs that ran in that hour, by how long each ran.</text>
+
+  <!-- Hour headers -->
+  <rect x="170" y="64" width="300" height="22" fill="#f1f5f9"/>
+  <rect x="470" y="64" width="300" height="22" fill="#e2e8f0"/>
+  <text x="320" y="79" text-anchor="middle" font-weight="600" fill="#0f172a">Hour 1 (10:00 – 11:00)</text>
+  <text x="620" y="79" text-anchor="middle" font-weight="600" fill="#0f172a">Hour 2 (11:00 – 12:00)</text>
+  <text x="170" y="100" text-anchor="middle" fill="#64748b" font-size="11">10:00</text>
+  <text x="470" y="100" text-anchor="middle" fill="#64748b" font-size="11">11:00</text>
+  <text x="770" y="100" text-anchor="middle" fill="#64748b" font-size="11">12:00</text>
+
+  <!-- Lane labels -->
+  <text x="20" y="130" font-weight="600" fill="#0f172a">Instance 1</text>
+  <text x="20" y="190" font-weight="600" fill="#0f172a">Instance 2</text>
+  <text x="20" y="250" font-weight="600" fill="#0f172a">Instance 3</text>
+  <text x="20" y="144" fill="#64748b" font-size="11">running 10:00–11:50</text>
+  <text x="20" y="204" fill="#64748b" font-size="11">running 10:10–11:30</text>
+  <text x="20" y="264" fill="#64748b" font-size="11">running 11:00–12:00</text>
+
+  <!-- Lane baselines (instance off) -->
+  <line x1="170" y1="125" x2="770" y2="125" stroke="#e2e8f0" stroke-dasharray="3,4"/>
+  <line x1="170" y1="185" x2="770" y2="185" stroke="#e2e8f0" stroke-dasharray="3,4"/>
+  <line x1="170" y1="245" x2="770" y2="245" stroke="#e2e8f0" stroke-dasharray="3,4"/>
+
+  <!-- 1 minute = 5px; 10:00 = x 170 -->
+  <!-- Instance 1: idle 0-5, A 5-50 (upload 47-50), idle 50-55, B 55-100 (upload 97-100), idle 100-110 -->
+  <rect x="170" y="110" width="25" height="30" fill="url(#idle)"/>
+  <rect x="195" y="110" width="225" height="30" fill="#3b82f6"/>
+  <rect x="405" y="110" width="15" height="30" fill="#1e3a8a"/>
+  <text x="300" y="129" text-anchor="middle" fill="#fff" font-weight="600">User A · job 1</text>
+  <rect x="420" y="110" width="25" height="30" fill="url(#idle)"/>
+  <rect x="445" y="110" width="225" height="30" fill="#f59e0b"/>
+  <rect x="655" y="110" width="15" height="30" fill="#92400e"/>
+  <text x="550" y="129" text-anchor="middle" fill="#fff" font-weight="600">User B · job 1</text>
+  <rect x="670" y="110" width="50" height="30" fill="url(#idle)"/>
+
+  <!-- Instance 2: idle 10-15, A retry 15-35, idle 35-40, A 40-80 (upload 77-80), idle 80-90 -->
+  <rect x="220" y="170" width="25" height="30" fill="url(#idle)"/>
+  <rect x="245" y="170" width="100" height="30" fill="url(#retry)" stroke="#3b82f6"/>
+  <text x="295" y="189" text-anchor="middle" fill="#1e3a8a" font-weight="600">A · failed try</text>
+  <rect x="345" y="170" width="25" height="30" fill="url(#idle)"/>
+  <rect x="370" y="170" width="200" height="30" fill="#3b82f6"/>
+  <rect x="555" y="170" width="15" height="30" fill="#1e3a8a"/>
+  <text x="462" y="189" text-anchor="middle" fill="#fff" font-weight="600">User A · job 2 (retry)</text>
+  <rect x="570" y="170" width="50" height="30" fill="url(#idle)"/>
+
+  <!-- Instance 3: idle 60-65, B 65-115 (upload 112-115), idle 115-120 -->
+  <rect x="470" y="230" width="25" height="30" fill="url(#idle)"/>
+  <rect x="495" y="230" width="250" height="30" fill="#f59e0b"/>
+  <rect x="730" y="230" width="15" height="30" fill="#92400e"/>
+  <text x="612" y="249" text-anchor="middle" fill="#fff" font-weight="600">User B · job 2</text>
+  <rect x="745" y="230" width="25" height="30" fill="url(#idle)"/>
+
+  <!-- Hour boundary through lanes and bars -->
+  <line x1="470" y1="64" x2="470" y2="440" stroke="#334155" stroke-width="1.5" stroke-dasharray="5,4"/>
+  <line x1="170" y1="64" x2="170" y2="440" stroke="#cbd5e1"/>
+  <line x1="770" y1="64" x2="770" y2="440" stroke="#cbd5e1"/>
+
+  <!-- Section 2: per-hour split -->
+  <line x1="20" y1="282" x2="800" y2="282" stroke="#e2e8f0"/>
+  <text x="20" y="303" font-weight="600" fill="#0f172a">Instance time</text>
+  <text x="20" y="317" fill="#64748b" font-size="11">what the hour's bill paid for</text>
+
+  <!-- Hour 1 instance time: A 85, B 5, idle 20 of 110 min -->
+  <rect x="170" y="294" width="231.8" height="26" fill="#3b82f6"/>
+  <rect x="401.8" y="294" width="13.6" height="26" fill="#f59e0b"/>
+  <rect x="415.4" y="294" width="54.6" height="26" fill="url(#idle)"/>
+  <text x="285" y="311" text-anchor="middle" fill="#fff" font-weight="600">User A</text>
+  <text x="442" y="311" text-anchor="middle" fill="#334155" font-weight="600">idle</text>
+
+  <!-- Hour 2 instance time: B 90, A 20, idle 30 of 140 min -->
+  <rect x="470" y="294" width="192.9" height="26" fill="#f59e0b"/>
+  <rect x="662.9" y="294" width="42.8" height="26" fill="#3b82f6"/>
+  <rect x="705.7" y="294" width="64.3" height="26" fill="url(#idle)"/>
+  <text x="566" y="311" text-anchor="middle" fill="#fff" font-weight="600">User B</text>
+  <text x="684" y="311" text-anchor="middle" fill="#fff" font-weight="600">A</text>
+  <text x="738" y="311" text-anchor="middle" fill="#334155" font-weight="600">idle</text>
+
+  <text x="320" y="337" text-anchor="middle" fill="#475569" font-size="11">110 instance-minutes: A 85 · B 5 · idle 20</text>
+  <text x="620" y="337" text-anchor="middle" fill="#475569" font-size="11">140 instance-minutes: B 90 · A 20 · idle 30</text>
+
+  <!-- Arrows -->
+  <line x1="320" y1="343" x2="320" y2="361" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="620" y1="343" x2="620" y2="361" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="330" y="357" fill="#475569" font-size="11" font-style="italic">idle shared by run time</text>
+  <text x="630" y="357" fill="#475569" font-size="11" font-style="italic">idle shared by run time</text>
+
+  <text x="20" y="381" font-weight="600" fill="#0f172a">Charged to</text>
+  <text x="20" y="395" fill="#64748b" font-size="11">the full hour's bill</text>
+
+  <!-- Hour 1 charged: A 85/90, B 5/90 -->
+  <rect x="170" y="370" width="283.3" height="26" fill="#3b82f6"/>
+  <rect x="453.3" y="370" width="16.7" height="26" fill="#f59e0b"/>
+  <text x="311" y="387" text-anchor="middle" fill="#fff" font-weight="600">User A · 94%</text>
+
+  <!-- Hour 2 charged: B 90/110, A 20/110 -->
+  <rect x="470" y="370" width="245.5" height="26" fill="#f59e0b"/>
+  <rect x="715.5" y="370" width="54.5" height="26" fill="#3b82f6"/>
+  <text x="592" y="387" text-anchor="middle" fill="#fff" font-weight="600">User B · 82%</text>
+  <text x="742" y="387" text-anchor="middle" fill="#fff" font-weight="600">A · 18%</text>
+
+  <text x="320" y="413" text-anchor="middle" fill="#475569" font-size="11">B ran 5 min this hour → 6%</text>
+  <text x="620" y="413" text-anchor="middle" fill="#475569" font-size="11">jobs spanning 11:00 pay each hour's share separately</text>
+
+  <!-- Legend -->
+  <line x1="20" y1="450" x2="800" y2="450" stroke="#e2e8f0"/>
+  <rect x="20" y="466" width="18" height="14" fill="#3b82f6"/>
+  <text x="44" y="477" fill="#0f172a">User A job</text>
+  <rect x="130" y="466" width="18" height="14" fill="#f59e0b"/>
+  <text x="154" y="477" fill="#0f172a">User B job</text>
+  <rect x="240" y="466" width="18" height="14" fill="url(#retry)" stroke="#3b82f6"/>
+  <text x="264" y="477" fill="#0f172a">failed attempt (still charged)</text>
+  <rect x="440" y="466" width="9" height="14" fill="#1e3a8a"/>
+  <rect x="449" y="466" width="9" height="14" fill="#92400e"/>
+  <text x="464" y="477" fill="#0f172a">output upload (counted as job time)</text>
+  <rect x="680" y="466" width="18" height="14" fill="url(#idle)"/>
+  <text x="704" y="477" fill="#0f172a">idle instance</text>
+
+  <text x="20" y="508" fill="#475569" font-size="11">• An hour in which no job ran at all has nobody to charge; its cost stays with the queue as overhead.</text>
+  <text x="20" y="524" fill="#475569" font-size="11">• A job's document is filed on the day it ended, but it pays the rate of every hour it actually ran.</text>
+  <text x="20" y="540" fill="#475569" font-size="11">• Under the old daily method, all jobs ending that day shared the whole day's bill by duration, wherever the idle time occurred.</text>
+</svg>

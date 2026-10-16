@@ -230,6 +230,11 @@ each hour, Cost Explorer provides the cost and the running instance-hours
 `products_staged[].time_end` (HySDS sets `time_end` before outputs are
 uploaded), and is split across the hours it overlaps.
 
+See [docs/hourly-attribution.md](docs/hourly-attribution.md) for a pipeline
+diagram and a worked timeline example:
+
+![Hourly attribution timeline](docs/hourly-attribution-timeline.svg)
+
 ```
 rate(queue, hour) = CE cost / job-seconds in that hour        (--hourly-idle jobs, default)
 rate(queue, hour) = CE cost / max(instance-seconds, job-seconds)  (--hourly-idle overhead)
