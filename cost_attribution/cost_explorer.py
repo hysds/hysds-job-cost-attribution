@@ -72,6 +72,85 @@ def fetch_queue_costs_by_day(
     return costs_by_day
 
 
+RUNNING_HOURS_FILTER = {
+    "Dimensions": {"Key": "USAGE_TYPE_GROUP", "Values": ["EC2: Running Hours"]},
+}
+
+
+def _tag_name(tag_key: str) -> str:
+    """Strip the "Name$" prefix CE puts on tag group keys."""
+    return tag_key.split("$", 1)[1] if "$" in tag_key else tag_key
+
+
+def _paged_results(ce_client, **kwargs):
+    """Yield ResultsByTime entries across all pages of a get_cost_and_usage call."""
+    token = None
+    while True:
+        if token:
+            kwargs["NextPageToken"] = token
+        response = ce_client.get_cost_and_usage(**kwargs)
+        yield from response.get("ResultsByTime", [])
+        token = response.get("NextPageToken")
+        if not token:
+            break
+
+
+def fetch_queue_usage(
+    ce_client,
+    start: str,
+    end: str,
+    granularity: str,
+    asg_prefix: str = "",
+    cost_metric: str = "AmortizedCost",
+) -> dict[str, dict[str, dict[str, float]]]:
+    """Fetch per-period cost and running instance-seconds grouped by Name tag.
+
+    Two CE queries over the same period grouping:
+    1. Total cost per Name tag (EC2 compute, EBS, etc. — same as the daily path)
+    2. UsageQuantity of "EC2: Running Hours" per Name tag (instance-hours)
+
+    Args:
+        start: Period start; YYYY-MM-DD for DAILY, YYYY-MM-DDTHH:MM:SSZ for HOURLY
+        end: Period end (exclusive), same format as start
+        granularity: "DAILY" or "HOURLY"
+        asg_prefix: Only include names starting with this prefix
+
+    Returns:
+        Dict mapping period start (as returned by CE) ->
+            {raw tag name -> {"cost": USD, "instance_seconds": seconds}}
+
+    Raises:
+        botocore ClientError on CE failure (e.g. HOURLY start beyond retention).
+    """
+    usage: dict[str, dict[str, dict[str, float]]] = {}
+    queries = [
+        ("cost", cost_metric, {}),
+        ("instance_seconds", "UsageQuantity", {"Filter": RUNNING_HOURS_FILTER}),
+    ]
+
+    for field_name, metric, extra in queries:
+        for result in _paged_results(
+            ce_client,
+            TimePeriod={"Start": start, "End": end},
+            Granularity=granularity,
+            Metrics=[metric],
+            GroupBy=[{"Type": "TAG", "Key": "Name"}],
+            **extra,
+        ):
+            period = usage.setdefault(result["TimePeriod"]["Start"], {})
+            for group in result.get("Groups", []):
+                name = _tag_name(group["Keys"][0])
+                if not name or (asg_prefix and not name.startswith(asg_prefix)):
+                    continue
+                amount = float(group["Metrics"][metric]["Amount"])
+                if field_name == "instance_seconds":
+                    amount *= 3600
+                entry = period.setdefault(name, {"cost": 0.0, "instance_seconds": 0.0})
+                entry[field_name] += amount
+
+    return usage
+
+
 def fetch_queue_costs(
     ce_client,
     start_date: str,

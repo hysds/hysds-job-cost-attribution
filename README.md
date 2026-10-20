@@ -158,7 +158,14 @@ When fallback is active, costs are estimated from the job's recorded instance ty
 
 **Default:** off.
 
-Query the metrics OpenSearch index for retry attempts that were overwritten in Mozart (i.e., the job was retried and the original attempt record no longer appears in `job_status-*`). These extra attempts are included in cost attribution so that retry compute is not silently ignored.
+Query the metrics OpenSearch index for retry attempts that were overwritten in Mozart (i.e., the job was retried and the original attempt record no longer appears in `job_status-*`). These extra attempts are included in cost attribution so that retry compute is charged to the job's owner instead of being spread across every job in the queue.
+
+How attempts are found:
+
+- Every metrics `job_info` doc whose attempt **ended inside the attribution window** is considered, even when the job's final attempt ended on a different day. The metrics `@timestamp` search is padded by 24 hours on each side, then filtered by the attempt's own `time_end`.
+- An attempt is "extra" when its `time_start` differs from the attempt Mozart currently holds for that job. Mozart records for jobs outside the window are looked up by ID in batches of 1000.
+- Each attempt gets a stable ID, `<job_id>-attempt-<start time digits>`, so reruns overwrite rather than duplicate.
+- Attempts whose job has no Mozart record are skipped (no owner to attribute to) and counted in a warning.
 
 ---
 
@@ -212,6 +219,73 @@ python -m cost_attribution
 **Default:** off.
 
 Calculate costs and build all documents, but skip the publish step. Nothing is written to Redis or OpenSearch. The summary is still printed to stdout. Use this to verify configuration and cost calculations before committing to a live run.
+
+---
+
+### `--hourly`
+
+Allocate cost per queue-hour instead of per day. For each queue's Name tag and
+each hour, Cost Explorer provides the cost and the running instance-hours
+(`USAGE_TYPE_GROUP = "EC2: Running Hours"`). A job's run interval is
+`job_info.time_start` to the later of `job_info.time_end` and its last
+`products_staged[].time_end` (HySDS sets `time_end` before outputs are
+uploaded), and is split across the hours it overlaps.
+
+See [docs/hourly-attribution.md](docs/hourly-attribution.md) for a pipeline
+diagram and a worked timeline example:
+
+![Hourly attribution timeline](docs/hourly-attribution-timeline.svg)
+
+```
+rate(queue, hour) = CE cost / job-seconds in that hour        (--hourly-idle jobs, default)
+rate(queue, hour) = CE cost / max(instance-seconds, job-seconds)  (--hourly-idle overhead)
+job cost          = Σ over the hours the job ran: seconds in that hour × rate
+queue overhead    = CE cost − Σ job cost
+```
+
+- `--hourly-idle jobs` (default): each hour's full cost, including idle
+  instance time, is split among the jobs that ran in that hour, per second.
+  Only hours in which no job ran remain as queue overhead. Each job doc
+  records the redistributed part in `cost.ec2_idle_share`; overhead docs
+  record the total in `overhead_details.idle_redistributed_to_jobs`.
+- `--hourly-idle overhead`: jobs pay only for the instance time they used;
+  scale-up/down and gaps between jobs are queue overhead.
+- Retry attempts (`--include-retries`) are charged for their own hours.
+- A worker ASG that had cost but no jobs is charged to its queue (as overhead)
+  rather than excluded as infra.
+- Job docs still go to the day of `time_end`; a job that spans midnight is
+  charged each hour's rate for the hours it ran. `timing.billed_seconds`
+  records the run interval used.
+- CE keeps HOURLY data for 14 days. Older hours use the same formulas with
+  daily cost and daily instance-/job-seconds.
+- Jobs ending from 2 days before to 2 days after the range are fetched so every
+  in-range hour's occupancy is complete; they get no documents. CE data is
+  fetched from 2 days before the range. Idle is only redistributed in hours
+  whose occupancy is complete; earlier hours fall back to the instance-seconds
+  rate.
+- The summary reconciles queue CE cost = in-range job cost + overhead and warns
+  about queue-hours with more job-seconds than instance-seconds.
+
+Cost: 4 CE requests per run (plus pagination), regardless of instance count.
+
+```bash
+python -m cost_attribution.main --date-range 2026-10-01 2026-10-12 \
+  --asg-prefix maap-ops-v5- --include-retries --hourly --output-json hourly.jsonl
+```
+
+---
+
+### `--output-json FILE`
+
+**Default:** none.
+
+Write every document that would be published (job costs and queue overheads, including `@index` and `doc_id`) to `FILE` as JSON Lines, one document per line. Implies `--dry-run`: nothing is written to Redis or OpenSearch. Works with `--date`, `--date-range`, and `--estimate-recent`.
+
+Use this to compare attribution logic changes against documents already in OpenSearch:
+
+```bash
+python -m cost_attribution --date 2026-10-10 --include-retries --output-json costs-2026-10-10.jsonl
+```
 
 ---
 

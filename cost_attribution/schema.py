@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .config import COST_INDEX_PREFIX
-from .utils import parse_job_type, safe_get, format_date_index
+from .utils import parse_job_type, safe_get, format_date_index, job_billed_seconds
 
 
 INDEX_TEMPLATE = {
@@ -44,6 +44,7 @@ INDEX_TEMPLATE = {
                         "started": {"type": "date"},
                         "ended": {"type": "date"},
                         "duration_seconds": {"type": "double"},
+                        "billed_seconds": {"type": "double"},
                         "queue_wait_seconds": {"type": "double"},
                     }
                 },
@@ -51,6 +52,7 @@ INDEX_TEMPLATE = {
                     "properties": {
                         "total": {"type": "double"},
                         "ec2_compute": {"type": "double"},
+                        "ec2_idle_share": {"type": "double"},
                         "ebs_storage": {"type": "double"},
                         "s3_output": {"type": "double"},
                         "ec2_idle": {"type": "double"},
@@ -159,11 +161,13 @@ def build_job_cost_document(
             "started": time_start,
             "ended": time_end,
             "duration_seconds": int(duration),
+            "billed_seconds": round(job_billed_seconds(job), 3),
             "queue_wait_seconds": int(queue_wait),
         },
         "cost": {
             "total": cost["total"],
             "ec2_compute": cost["ec2_compute"],
+            "ec2_idle_share": cost.get("ec2_idle_share", 0.0),
             "ebs_storage": cost["ebs_storage"],
             "s3_output": cost["s3_output"],
         },
