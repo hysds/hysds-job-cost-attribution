@@ -620,6 +620,24 @@ def fetch_usage_hourly_and_daily(
     return hourly, daily
 
 
+def require_ce_data(hourly_usage: dict, daily_usage: dict, report_days: set[str]) -> None:
+    """Fail if CE returned no cost for any report day.
+
+    Without this, a day with no CE data (e.g. hourly granularity denied and no
+    daily data yet) is priced at $0 and published as if it were real.
+    """
+    cost_by_day: dict[str, float] = defaultdict(float)
+    for usage in (hourly_usage, daily_usage):
+        for period, tags in usage.items():
+            cost_by_day[period[:10]] += sum(t["cost"] for t in tags.values())
+    missing = sorted(d for d in report_days if cost_by_day.get(d, 0.0) <= 0.0)
+    if missing:
+        raise click.ClickException(
+            "No Cost Explorer cost data for " + ", ".join(missing)
+            + ". Nothing was published. CE data can lag by a few days, and HOURLY granularity must be enabled on the payer account."
+        )
+
+
 def run_date_range_hourly(
     start_date: str,
     end_date: str,
@@ -669,6 +687,7 @@ def run_date_range_hourly(
     hourly_usage, daily_usage = fetch_usage_hourly_and_daily(
         ce_client, dt_start - pad, range_end_exclusive, asg_prefix, temp_config.cost_metric,
     )
+    require_ce_data(hourly_usage, daily_usage, report_days)
 
     # Jobs: ending pad days before the range through pad days after it. The
     # extra jobs get no documents, but they make each hour's occupancy
